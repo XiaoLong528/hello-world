@@ -1,0 +1,105 @@
+name: Docker CI
+
+on:
+  push:
+    branches: [ master ]
+    tags: ['v*', 'release-*']
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Fedora image to GHCR
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: Dockerfile
+          push: ${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') }}
+          tags: ghcr.io/${{ github.repository_owner }}/hello-http-fetch:latest,ghcr.io/${{ github.repository_owner }}/hello-http-fetch:${{ github.sha }}
+
+      - name: Login to Docker Hub
+        if: ${{ (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) && secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
+        uses: docker/login-action@v2
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Fedora image to Docker Hub
+        if: ${{ (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) && secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/hello-http-fetch:latest,docker.io/${{ secrets.DOCKERHUB_USERNAME }}/hello-http-fetch:${{ github.sha }}
+
+      - name: Build and push UBI minimal image to GHCR
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: Dockerfile.ubi-minimal
+          push: ${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/') }}
+          tags: ghcr.io/${{ github.repository_owner }}/hello-http-fetch-ubi:latest,ghcr.io/${{ github.repository_owner }}/hello-http-fetch-ubi:${{ github.sha }}
+
+      - name: Build and push UBI minimal image to Docker Hub
+        if: ${{ (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) && secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: Dockerfile.ubi-minimal
+          push: true
+          tags: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/hello-http-fetch-ubi:latest,docker.io/${{ secrets.DOCKERHUB_USERNAME }}/hello-http-fetch-ubi:${{ github.sha }}
+
+  smoke-test:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull Fedora image (use local build if available)
+        run: |
+          IMAGE=ghcr.io/${{ github.repository_owner }}/hello-http-fetch:latest
+          docker pull "$IMAGE" || true
+          docker run --rm -v "$GITHUB_WORKSPACE":/data "$IMAGE" || (echo "Container run failed" && exit 1)
+
+      - name: Validate output (Fedora image)
+        run: |
+          if [ ! -f output.html.gz ]; then echo "output.html.gz not found" && exit 1; fi
+          # ensure gzip valid and contains HTML/title
+          gzip -t output.html.gz || (echo "gzip validation failed" && exit 1)
+          gzip -d -c output.html.gz | grep -i -E "<title|<html" || (echo "decompressed content validation failed" && exit 1)
+
+      - name: Pull UBI image
+        run: |
+          IMAGE=ghcr.io/${{ github.repository_owner }}/hello-http-fetch-ubi:latest
+          docker pull "$IMAGE" || true
+          docker run --rm -v "$GITHUB_WORKSPACE":/data "$IMAGE" || (echo "UBI container run failed" && exit 1)
+
+      - name: Validate output (UBI image)
+        run: |
+          if [ ! -f output.html.gz ]; then echo "output.html.gz not found after UBI run" && exit 1; fi
+          gzip -t output.html.gz || (echo "gzip validation failed for UBI" && exit 1)
+          gzip -d -c output.html.gz | grep -i -E "<title|<html" || (echo "decompressed content validation failed for UBI" && exit 1)
